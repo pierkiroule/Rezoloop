@@ -1,10 +1,17 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   EMOJI_LIBRARY,
   createGraphLink,
   createGraphNode,
   deriveTransmediaParameters,
 } from "./graphModel";
+import {
+  INTENTION_OPTIONS,
+  PUBLIC_OPTIONS,
+  TRANSMEDIA_PACKS,
+  filterPacksByContext,
+  matchPackResources,
+} from "./transmediaPacks";
 
 const PROMPT = "Dépose ce qui est là, en emojis.";
 const RESONANCE_LABEL = "Faire résonner";
@@ -25,6 +32,20 @@ export default function App() {
   const [links, setLinks] = useState([]);
   const [picker, setPicker] = useState({ open: false, x: 0.5, y: 0.5 });
   const [resonance, setResonance] = useState(null);
+  const [usageContext, setUsageContext] = useState({
+    intentions: [],
+    publics: [],
+  });
+  const [activePackIndex, setActivePackIndex] = useState(0);
+
+  const compatiblePacks = useMemo(
+    () => filterPacksByContext(TRANSMEDIA_PACKS, usageContext),
+    [usageContext]
+  );
+
+  useEffect(() => {
+    setActivePackIndex(0);
+  }, [usageContext]);
 
   const linkPaths = useMemo(() => {
     const nodeMap = nodes.reduce((acc, node) => {
@@ -151,15 +172,93 @@ export default function App() {
 
   const handleResonance = () => {
     if (!nodes.length) return;
-    setResonance(deriveTransmediaParameters(nodes, links));
+    const nextResonance = deriveTransmediaParameters(nodes, links);
+    const activePack =
+      compatiblePacks[activePackIndex] ??
+      compatiblePacks[0] ??
+      TRANSMEDIA_PACKS[0];
+    const resources = activePack ? matchPackResources(nextResonance, activePack) : null;
+    setResonance({
+      ...nextResonance,
+      pack: activePack,
+      compatibleCount: compatiblePacks.length,
+      resources,
+    });
   };
 
   const clearResonance = () => setResonance(null);
   const closePicker = () => setPicker((prev) => ({ ...prev, open: false }));
+  const toggleUsageValue = (key, value) => {
+    setUsageContext((prev) => {
+      const current = prev[key] ?? [];
+      const next = current.includes(value)
+        ? current.filter((entry) => entry !== value)
+        : [...current, value];
+      return { ...prev, [key]: next };
+    });
+  };
+  const resetUsageContext = () =>
+    setUsageContext({ intentions: [], publics: [] });
 
   return (
     <div className="app">
       <div className="field" />
+      <div className="context-panel" aria-label="Cadre d'usage">
+        <div className="context-header">
+          <span>Cadre d&apos;usage</span>
+          <button type="button" onClick={resetUsageContext}>
+            Neutre
+          </button>
+        </div>
+        <div className="context-section">
+          <h4>Intentions</h4>
+          <div className="context-options">
+            {INTENTION_OPTIONS.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                aria-pressed={usageContext.intentions.includes(option.id)}
+                onClick={() => toggleUsageValue("intentions", option.id)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="context-section">
+          <h4>Publics</h4>
+          <div className="context-options">
+            {PUBLIC_OPTIONS.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                aria-pressed={usageContext.publics.includes(option.id)}
+                onClick={() => toggleUsageValue("publics", option.id)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="context-footer">
+          <span>
+            Packs compatibles: {compatiblePacks.length || TRANSMEDIA_PACKS.length}
+          </span>
+          <button
+            type="button"
+            disabled={compatiblePacks.length < 2}
+            onClick={() =>
+              setActivePackIndex((prev) =>
+                compatiblePacks.length
+                  ? (prev + 1) % compatiblePacks.length
+                  : 0
+              )
+            }
+          >
+            Suivant
+          </button>
+        </div>
+      </div>
       <div
         ref={graphRef}
         className="graph-area"
@@ -276,6 +375,13 @@ export default function App() {
               <p>Opacité: {resonance.text.opacity.toFixed(2)}</p>
               <p>Fragmentation: {resonance.text.fragmentation.toFixed(2)}</p>
               <p>Rythme: {resonance.text.pace.toFixed(2)}</p>
+            </div>
+            <div>
+              <h4>Pack</h4>
+              <p>{resonance.pack?.label ?? "—"}</p>
+              <p>Vidéo: {resonance.resources?.video?.label ?? "—"}</p>
+              <p>Audio: {resonance.resources?.audio?.label ?? "—"}</p>
+              <p>Texte: {resonance.resources?.text?.label ?? "—"}</p>
             </div>
           </div>
         </div>
