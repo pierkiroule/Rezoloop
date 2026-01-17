@@ -3,18 +3,9 @@ import {
   EMOJI_LIBRARY,
   createGraphLink,
   createGraphNode,
-  deriveTransmediaParameters,
 } from "./graphModel";
-import {
-  INTENTION_OPTIONS,
-  PUBLIC_OPTIONS,
-  TRANSMEDIA_PACKS,
-  filterPacksByContext,
-  matchPackResources,
-} from "./transmediaPacks";
 
 const PROMPT = "Dépose ce qui est là, en emojis.";
-const RESONANCE_LABEL = "Faire résonner";
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
@@ -24,28 +15,62 @@ const getRelativePosition = (event, rect) => {
   return { x, y };
 };
 
+const TAG_POOL = {
+  fluid: ["onde", "sillage", "remous", "dérive", "écume"],
+  mist: ["brume", "halo", "voile", "brouillard", "lueur"],
+  kinetic: ["impact", "pulse", "élan", "frisson", "choc"],
+  pulse: ["rythme", "battement", "clignement", "surge", "éclair"],
+  organic: ["sève", "pollen", "croissance", "respire", "racine"],
+  mineral: ["grain", "minéral", "strates", "lave", "poussière"],
+  orbit: ["orbite", "gravité", "cycle", "halo", "constellation"],
+  vector: ["flux", "tension", "trajectoire", "axe", "dérive"],
+  reflective: ["reflet", "miroir", "retour", "prisme", "écho"],
+  thread: ["fil", "trame", "liaison", "tissage", "nœud"],
+  nocturne: ["nocturne", "velours", "ombre", "veille", "silence"],
+  spark: ["étincelle", "scintillement", "jaillissement", "lueur", "spark"],
+};
+
+const createId = () =>
+  typeof crypto !== "undefined" && crypto.randomUUID
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2);
+
+const pickTagText = (nodes, links) => {
+  if (!nodes.length) return "";
+  const weightedTypes = nodes.map((node) => node.type);
+  const type = weightedTypes[Math.floor(Math.random() * weightedTypes.length)];
+  const words = TAG_POOL[type] ?? TAG_POOL.fluid;
+  const base = words[Math.floor(Math.random() * words.length)];
+  if (!links.length || Math.random() < 0.6) return base;
+  const otherType =
+    weightedTypes[Math.floor(Math.random() * weightedTypes.length)] ?? type;
+  const otherWords = TAG_POOL[otherType] ?? TAG_POOL.fluid;
+  const other = otherWords[Math.floor(Math.random() * otherWords.length)];
+  if (other === base) return base;
+  return `${base} · ${other}`;
+};
+
 export default function App() {
   const graphRef = useRef(null);
   const longPressRef = useRef(null);
   const dragRef = useRef(null);
+  const deletePressRef = useRef(null);
+  const animationRef = useRef(null);
+  const nodesRef = useRef([]);
+  const audioRef = useRef(null);
+  const energyRef = useRef(0);
+  const lastTagRef = useRef(0);
+
+  const [mode, setMode] = useState("STOP");
   const [nodes, setNodes] = useState([]);
   const [links, setLinks] = useState([]);
   const [picker, setPicker] = useState({ open: false, x: 0.5, y: 0.5 });
-  const [resonance, setResonance] = useState(null);
-  const [usageContext, setUsageContext] = useState({
-    intentions: [],
-    publics: [],
-  });
-  const [activePackIndex, setActivePackIndex] = useState(0);
-
-  const compatiblePacks = useMemo(
-    () => filterPacksByContext(TRANSMEDIA_PACKS, usageContext),
-    [usageContext]
-  );
+  const [tags, setTags] = useState([]);
+  const [energy, setEnergy] = useState(0);
 
   useEffect(() => {
-    setActivePackIndex(0);
-  }, [usageContext]);
+    nodesRef.current = nodes;
+  }, [nodes]);
 
   const linkPaths = useMemo(() => {
     const nodeMap = nodes.reduce((acc, node) => {
@@ -70,12 +95,37 @@ export default function App() {
     setPicker({ open: true, ...position });
   };
 
-  const addEmoji = (symbol) => {
-    setNodes((prev) => [
+  const spawnTag = ({ x, y, reason = "" }) => {
+    const now = Date.now();
+    if (now - lastTagRef.current < 700 && reason !== "add") return;
+    lastTagRef.current = now;
+    const text = pickTagText(nodesRef.current, links);
+    if (!text) return;
+    const ttl = 2400 + Math.random() * 1600;
+    setTags((prev) => [
       ...prev,
-      createGraphNode({ symbol, position: { x: picker.x, y: picker.y } }),
+      {
+        id: createId(),
+        text,
+        x,
+        y,
+        createdAt: now,
+        ttl,
+      },
     ]);
+  };
+
+  const addEmoji = (symbol) => {
+    const node = {
+      ...createGraphNode({ symbol, position: { x: picker.x, y: picker.y } }),
+      vx: (Math.random() - 0.5) * 0.02,
+      vy: (Math.random() - 0.5) * 0.02,
+    };
+    setNodes((prev) => [...prev, node]);
     setPicker((prev) => ({ ...prev, open: false }));
+    if (mode === "PLAY") {
+      spawnTag({ x: node.x, y: node.y, reason: "add" });
+    }
   };
 
   const handleCanvasPointerDown = (event) => {
@@ -98,6 +148,7 @@ export default function App() {
 
   const handleNodePointerDown = (event, nodeId) => {
     event.stopPropagation();
+    if (mode === "PLAY") return;
     const rect = graphRef.current?.getBoundingClientRect();
     if (!rect) return;
     const position = getRelativePosition(event, rect);
@@ -109,11 +160,26 @@ export default function App() {
       offsetX: position.x - node.x,
       offsetY: position.y - node.y,
     };
+    deletePressRef.current = window.setTimeout(() => {
+      setNodes((prev) => prev.filter((item) => item.id !== nodeId));
+      setLinks((prev) =>
+        prev.filter(
+          (link) => link.sourceId !== nodeId && link.targetId !== nodeId
+        )
+      );
+      dragRef.current = null;
+      deletePressRef.current = null;
+    }, 520);
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
   const handleNodePointerMove = (event) => {
+    if (mode === "PLAY") return;
     if (!dragRef.current) return;
+    if (deletePressRef.current) {
+      window.clearTimeout(deletePressRef.current);
+      deletePressRef.current = null;
+    }
     const rect = graphRef.current?.getBoundingClientRect();
     if (!rect) return;
     const position = getRelativePosition(event, rect);
@@ -127,6 +193,11 @@ export default function App() {
   };
 
   const handleNodePointerUp = (event) => {
+    if (mode === "PLAY") return;
+    if (deletePressRef.current) {
+      window.clearTimeout(deletePressRef.current);
+      deletePressRef.current = null;
+    }
     if (!dragRef.current) return;
     const rect = graphRef.current?.getBoundingClientRect();
     if (!rect) return;
@@ -166,99 +237,150 @@ export default function App() {
             weight,
           }),
         ]);
+        if (mode === "PLAY") {
+          spawnTag({ x: closest.node.x, y: closest.node.y, reason: "link" });
+        }
       }
     }
   };
 
-  const handleResonance = () => {
-    if (!nodes.length) return;
-    const nextResonance = deriveTransmediaParameters(nodes, links);
-    const activePack =
-      compatiblePacks[activePackIndex] ??
-      compatiblePacks[0] ??
-      TRANSMEDIA_PACKS[0];
-    const resources = activePack ? matchPackResources(nextResonance, activePack) : null;
-    setResonance({
-      ...nextResonance,
-      pack: activePack,
-      compatibleCount: compatiblePacks.length,
-      resources,
-    });
+  const closePicker = () => setPicker((prev) => ({ ...prev, open: false }));
+
+  const toggleMode = () => {
+    setMode((prev) => (prev === "PLAY" ? "STOP" : "PLAY"));
   };
 
-  const clearResonance = () => setResonance(null);
-  const closePicker = () => setPicker((prev) => ({ ...prev, open: false }));
-  const toggleUsageValue = (key, value) => {
-    setUsageContext((prev) => {
-      const current = prev[key] ?? [];
-      const next = current.includes(value)
-        ? current.filter((entry) => entry !== value)
-        : [...current, value];
-      return { ...prev, [key]: next };
-    });
+  const ensureAudio = async () => {
+    if (audioRef.current) return;
+    if (!navigator?.mediaDevices?.getUserMedia) return;
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 128;
+    const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const source = audioContext.createMediaStreamSource(stream);
+      source.connect(analyser);
+      audioRef.current = { audioContext, analyser, dataArray, stream, source };
+    } catch (error) {
+      audioRef.current = { audioContext, analyser, dataArray };
+    }
   };
-  const resetUsageContext = () =>
-    setUsageContext({ intentions: [], publics: [] });
+
+  useEffect(() => {
+    if (mode === "PLAY") {
+      ensureAudio();
+    }
+  }, [mode]);
+
+  useEffect(() => {
+    if (mode !== "PLAY") {
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current);
+      }
+      setNodes((prev) =>
+        prev.map((node) => ({ ...node, vx: 0, vy: 0 }))
+      );
+      return undefined;
+    }
+
+    let lastTime = performance.now();
+
+    const animate = (time) => {
+      const delta = Math.min((time - lastTime) / 1000, 0.05);
+      lastTime = time;
+
+      let audioEnergy = 0.35 + Math.sin(time / 850) * 0.15;
+      const audioState = audioRef.current;
+      if (audioState?.analyser) {
+        audioState.analyser.getByteFrequencyData(audioState.dataArray);
+        const average =
+          audioState.dataArray.reduce((sum, value) => sum + value, 0) /
+          audioState.dataArray.length;
+        audioEnergy = clamp(average / 160, 0.2, 1);
+      }
+      energyRef.current = audioEnergy;
+      setEnergy(audioEnergy);
+
+      setNodes((prev) => {
+        const next = prev.map((node) => ({ ...node }));
+        for (let i = 0; i < next.length; i += 1) {
+          const node = next[i];
+          let fx = 0;
+          let fy = 0;
+          for (let j = 0; j < next.length; j += 1) {
+            if (i === j) continue;
+            const other = next[j];
+            const dx = node.x - other.x;
+            const dy = node.y - other.y;
+            const dist = Math.hypot(dx, dy) + 0.001;
+            const repel = 0.006 / (dist * dist);
+            fx += (dx / dist) * repel;
+            fy += (dy / dist) * repel;
+            if (dist < 0.08 && Math.random() < 0.003) {
+              spawnTag({
+                x: clamp((node.x + other.x) / 2, 0.08, 0.92),
+                y: clamp((node.y + other.y) / 2, 0.08, 0.92),
+                reason: "collision",
+              });
+            }
+          }
+
+          links.forEach((link) => {
+            if (link.sourceId !== node.id && link.targetId !== node.id) return;
+            const otherId = link.sourceId === node.id ? link.targetId : link.sourceId;
+            const other = next.find((candidate) => candidate.id === otherId);
+            if (!other) return;
+            const dx = other.x - node.x;
+            const dy = other.y - node.y;
+            const dist = Math.hypot(dx, dy) + 0.001;
+            const restLength = 0.18;
+            const spring = (dist - restLength) * 0.04 * link.weight;
+            fx += (dx / dist) * spring;
+            fy += (dy / dist) * spring;
+          });
+
+          const centerDx = 0.5 - node.x;
+          const centerDy = 0.5 - node.y;
+          fx += centerDx * 0.002;
+          fy += centerDy * 0.002;
+
+          const energyBoost = 0.8 + audioEnergy * 1.4;
+          node.vx = (node.vx + fx) * 0.92;
+          node.vy = (node.vy + fy) * 0.92;
+          node.x = clamp(node.x + node.vx * delta * energyBoost, 0.05, 0.95);
+          node.y = clamp(node.y + node.vy * delta * energyBoost, 0.05, 0.95);
+
+          if (node.x <= 0.05 || node.x >= 0.95) node.vx *= -0.7;
+          if (node.y <= 0.05 || node.y >= 0.95) node.vy *= -0.7;
+        }
+        return next;
+      });
+
+      setTags((prev) => {
+        const now = Date.now();
+        return prev.filter((tag) => now - tag.createdAt < tag.ttl);
+      });
+
+      animationRef.current = requestAnimationFrame(animate);
+    };
+
+    animationRef.current = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(animationRef.current);
+  }, [links, mode]);
 
   return (
-    <div className="app">
+    <div className={`app mode-${mode.toLowerCase()}`} style={{ "--energy": energy }}>
       <div className="field" />
-      <div className="context-panel" aria-label="Cadre d'usage">
-        <div className="context-header">
-          <span>Cadre d&apos;usage</span>
-          <button type="button" onClick={resetUsageContext}>
-            Neutre
-          </button>
-        </div>
-        <div className="context-section">
-          <h4>Intentions</h4>
-          <div className="context-options">
-            {INTENTION_OPTIONS.map((option) => (
-              <button
-                key={option.id}
-                type="button"
-                aria-pressed={usageContext.intentions.includes(option.id)}
-                onClick={() => toggleUsageValue("intentions", option.id)}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="context-section">
-          <h4>Publics</h4>
-          <div className="context-options">
-            {PUBLIC_OPTIONS.map((option) => (
-              <button
-                key={option.id}
-                type="button"
-                aria-pressed={usageContext.publics.includes(option.id)}
-                onClick={() => toggleUsageValue("publics", option.id)}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="context-footer">
-          <span>
-            Packs compatibles: {compatiblePacks.length || TRANSMEDIA_PACKS.length}
-          </span>
-          <button
-            type="button"
-            disabled={compatiblePacks.length < 2}
-            onClick={() =>
-              setActivePackIndex((prev) =>
-                compatiblePacks.length
-                  ? (prev + 1) % compatiblePacks.length
-                  : 0
-              )
-            }
-          >
-            Suivant
-          </button>
-        </div>
-      </div>
+      <button
+        type="button"
+        className="mode-toggle"
+        onClick={toggleMode}
+        aria-label={mode === "PLAY" ? "Reprendre la main" : "Faire résonner"}
+      >
+        {mode === "PLAY" ? "■" : "▶"}
+      </button>
       <div
         ref={graphRef}
         className="graph-area"
@@ -276,7 +398,7 @@ export default function App() {
               <path
                 key={link.id}
                 d={path}
-                style={{ opacity: 0.3 + link.weight * 0.6 }}
+                style={{ opacity: 0.25 + link.weight * 0.6 }}
               />
             );
           })}
@@ -302,21 +424,32 @@ export default function App() {
           </div>
         ) : null}
 
+        {mode === "PLAY" ? (
+          <div className="tags-layer" aria-hidden="true">
+            {tags.map((tag) => (
+              <span
+                key={tag.id}
+                className="tag"
+                style={{
+                  left: `${tag.x * 100}%`,
+                  top: `${tag.y * 100}%`,
+                  animationDuration: `${tag.ttl}ms`,
+                }}
+              >
+                {tag.text}
+              </span>
+            ))}
+          </div>
+        ) : null}
+
         <div className="controls">
           <button
             type="button"
             className="control ghost"
             onClick={() => setPicker({ open: true, x: 0.5, y: 0.5 })}
+            aria-label="Ajouter un emoji"
           >
-            + Ajouter
-          </button>
-          <button
-            type="button"
-            className="control"
-            onClick={handleResonance}
-            disabled={!nodes.length}
-          >
-            {RESONANCE_LABEL}
+            +
           </button>
         </div>
 
@@ -342,50 +475,6 @@ export default function App() {
           </div>
         ) : null}
       </div>
-
-      {resonance ? (
-        <div className="resonance" role="dialog" aria-live="polite">
-          <div className="resonance-header">
-            <span>Matrice de résonance</span>
-            <button type="button" onClick={clearResonance}>
-              Fermer
-            </button>
-          </div>
-          <div className="resonance-grid">
-            <div>
-              <h4>Graphe</h4>
-              <p>Densité: {resonance.metrics.density.toFixed(2)}</p>
-              <p>Centralité: {resonance.metrics.centrality.toFixed(2)}</p>
-              <p>Poids moyen: {resonance.metrics.averageWeight.toFixed(2)}</p>
-            </div>
-            <div>
-              <h4>Animation</h4>
-              <p>Flux: {resonance.animation.flow.toFixed(2)}</p>
-              <p>Turbulence: {resonance.animation.turbulence.toFixed(2)}</p>
-              <p>Loop: {resonance.animation.loopSeconds}s</p>
-            </div>
-            <div>
-              <h4>Audio</h4>
-              <p>Texture: {resonance.audio.texture.toFixed(2)}</p>
-              <p>Énergie: {resonance.audio.energy.toFixed(2)}</p>
-              <p>Grain: {resonance.audio.grain.toFixed(2)}</p>
-            </div>
-            <div>
-              <h4>Texte</h4>
-              <p>Opacité: {resonance.text.opacity.toFixed(2)}</p>
-              <p>Fragmentation: {resonance.text.fragmentation.toFixed(2)}</p>
-              <p>Rythme: {resonance.text.pace.toFixed(2)}</p>
-            </div>
-            <div>
-              <h4>Pack</h4>
-              <p>{resonance.pack?.label ?? "—"}</p>
-              <p>Vidéo: {resonance.resources?.video?.label ?? "—"}</p>
-              <p>Audio: {resonance.resources?.audio?.label ?? "—"}</p>
-              <p>Texte: {resonance.resources?.text?.label ?? "—"}</p>
-            </div>
-          </div>
-        </div>
-      ) : null}
     </div>
   );
 }
