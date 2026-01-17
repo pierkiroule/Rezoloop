@@ -4,6 +4,7 @@ import {
   forceLink,
   forceManyBody,
   forceSimulation,
+  forceCollide,
 } from "d3-force";
 import * as THREE from "three";
 
@@ -205,6 +206,7 @@ function GraphLayer({
       text.addEventListener("pointerdown", (event) => {
         if (modeRef.current === "PLAY") return;
         event.stopPropagation();
+        event.currentTarget.setPointerCapture(event.pointerId);
         draggingRef.current = {
           id: node.id,
           startX: event.clientX,
@@ -235,9 +237,13 @@ function GraphLayer({
         if (!moved) {
           if (selectedRef.current && selectedRef.current !== node.id) {
             onLink(selectedRef.current, node.id);
+            const previous = selectedRef.current;
             selectedRef.current = null;
+            elementsRef.current.nodes.get(previous)?.classList.remove("is-selected");
           } else {
             selectedRef.current = node.id;
+            elementsRef.current.nodes.forEach((el) => el.classList.remove("is-selected"));
+            elementsRef.current.nodes.get(node.id)?.classList.add("is-selected");
           }
         }
       });
@@ -253,6 +259,9 @@ function GraphLayer({
       if (!nodes.find((node) => node.id === id)) {
         text.remove();
         elements.nodes.delete(id);
+        if (selectedRef.current === id) {
+          selectedRef.current = null;
+        }
       }
     });
   }, [graphRef, mode, onLink, onRemoveNode]);
@@ -281,6 +290,7 @@ function GraphLayer({
           .strength((d) => d.strength)
       )
       .force("charge", forceManyBody().strength(-60))
+      .force("collide", forceCollide(22).strength(0.9).iterations(2))
       .force("center", forceCenter(width / 2, height / 2));
 
     linkForceRef.current = simulation.force("link");
@@ -357,7 +367,6 @@ function GraphLayer({
     } else {
       simulation.alpha(0.2).restart();
       simulation.tick(30);
-      simulation.stop();
     }
   }, [graphRef, graphVersion, mode, updateElements]);
 
@@ -489,6 +498,7 @@ export default function App() {
   const [graphVersion, setGraphVersion] = useState(0);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [tags, setTags] = useState([]);
+  const [selectedEmojis, setSelectedEmojis] = useState([]);
 
   const graphRef = useRef({ nodes: [], links: [] });
   const resoParamsRef = useRef({
@@ -508,6 +518,12 @@ export default function App() {
       setGraphVersion((prev) => prev + 1);
     }
   }, []);
+
+  useEffect(() => {
+    if (pickerOpen) {
+      setSelectedEmojis([]);
+    }
+  }, [pickerOpen]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -546,23 +562,38 @@ export default function App() {
     ]);
   }, [pickTagText]);
 
-  const addEmoji = (emoji) => {
-    graphRef.current.nodes.push(createNode(emoji));
+  const addSelectedEmojis = () => {
+    if (selectedEmojis.length === 0) return;
+    selectedEmojis.forEach((emoji) => {
+      graphRef.current.nodes.push(createNode(emoji));
+    });
     setGraphVersion((prev) => prev + 1);
     setPickerOpen(false);
+    setSelectedEmojis([]);
     spawnTag("add");
+  };
+
+  const toggleEmojiSelection = (emoji) => {
+    setSelectedEmojis((prev) =>
+      prev.includes(emoji) ? prev.filter((item) => item !== emoji) : [...prev, emoji]
+    );
   };
 
   const addLink = (sourceId, targetId) => {
     if (sourceId === targetId) return;
-    const existing = graphRef.current.links.some(
+    const existingIndex = graphRef.current.links.findIndex(
       (link) =>
         (getLinkNodeId(link.source) === sourceId &&
           getLinkNodeId(link.target) === targetId) ||
         (getLinkNodeId(link.source) === targetId &&
           getLinkNodeId(link.target) === sourceId)
     );
-    if (existing) return;
+    if (existingIndex !== -1) {
+      graphRef.current.links.splice(existingIndex, 1);
+      setGraphVersion((prev) => prev + 1);
+      spawnTag("unlink");
+      return;
+    }
     graphRef.current.links.push(createLink(sourceId, targetId, 0.6));
     setGraphVersion((prev) => prev + 1);
     spawnTag("link");
@@ -635,10 +666,31 @@ export default function App() {
         <div className="picker">
           <div className="picker-grid">
             {emojiOptions.map((emoji) => (
-              <button type="button" key={emoji} onClick={() => addEmoji(emoji)}>
+              <button
+                type="button"
+                key={emoji}
+                onClick={() => toggleEmojiSelection(emoji)}
+                className={selectedEmojis.includes(emoji) ? "is-selected" : ""}
+                aria-pressed={selectedEmojis.includes(emoji)}
+              >
                 {emoji}
               </button>
             ))}
+          </div>
+          <div className="picker-actions">
+            <span className="picker-count">
+              {selectedEmojis.length
+                ? `${selectedEmojis.length} sélectionné${selectedEmojis.length > 1 ? "s" : ""}`
+                : "Sélectionnez un ou plusieurs"}
+            </span>
+            <button
+              type="button"
+              className="picker-submit"
+              onClick={addSelectedEmojis}
+              disabled={selectedEmojis.length === 0}
+            >
+              Déposer
+            </button>
           </div>
           <button type="button" className="picker-close" onClick={() => setPickerOpen(false)}>
             Annuler
