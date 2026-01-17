@@ -1,1157 +1,125 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  forceCenter,
-  forceLink,
-  forceManyBody,
-  forceSimulation,
-  forceCollide,
-} from "d3-force";
-import * as THREE from "three";
+import { useEffect, useMemo, useRef, useState } from "react";
+import RenderEngine from "./engine/RenderEngine";
+import WorldEngine from "./engine/WorldEngine";
+import InteractionEngine from "./engine/InteractionEngine";
+import StorageEngine from "./engine/StorageEngine";
+import EmojiDeck from "./ui/EmojiDeck";
+import Controls from "./ui/Controls";
+import Gallery from "./ui/Gallery";
 
-const EMOJI_LIBRARY = [
-  "🌊",
-  "🌫️",
-  "🔥",
-  "⚡",
-  "🌱",
-  "🪨",
-  "🪐",
-  "🧭",
-  "🪞",
-  "🧵",
-  "🌙",
-  "✨",
-];
+const INITIAL_EMOJIS = ["🌙", "🪐", "✨", "☄️", "🌌", "🌀", "🌟", "💫", "🌑", "🛰️"];
 
-const VISUAL_PRESETS = {
-  brume: {
-    label: "Brume bleutée",
-    tintA: "#0a0f1b",
-    tintB: "#6f8cff",
-  },
-  eclipse: {
-    label: "Éclipse",
-    tintA: "#09080f",
-    tintB: "#ff6fb1",
-  },
-  lave: {
-    label: "Lave douce",
-    tintA: "#140a08",
-    tintB: "#ff9f5a",
-  },
-};
+const buildInitialBubbles = (world) =>
+  INITIAL_EMOJIS.map((emoji, index) => world.createBubble(emoji, index));
 
-const TAG_POOL = [
-  "onde",
-  "sillage",
-  "brume",
-  "halo",
-  "élan",
-  "frisson",
-  "pollen",
-  "gravité",
-  "tension",
-  "reflet",
-  "trame",
-  "silence",
-  "étincelle",
-  "écho",
-];
-
-const createId = () =>
-  typeof crypto !== "undefined" && crypto.randomUUID
-    ? crypto.randomUUID()
-    : Math.random().toString(36).slice(2);
-
-const clamp = (value, min = 0, max = 1) => Math.min(Math.max(value, min), max);
-
-const createNode = (emoji) => ({ id: createId(), emoji });
-
-const createLink = (sourceId, targetId, strength = 0.6) => ({
-  id: createId(),
-  source: sourceId,
-  target: targetId,
-  strength: clamp(strength, 0.2, 1),
-});
-
-const getLinkNodeId = (value) =>
-  typeof value === "object" && value !== null ? value.id : value;
-
-const computeResoParams = (nodes, links) => {
-  if (!nodes.length) {
-    return {
-      density: 0,
-      tension: 0,
-      spread: 0,
-      rhythm: 0,
-      heterogeneity: 0,
-    };
-  }
-
-  const positions = nodes
-    .map((node) => ({ x: node.x ?? 0, y: node.y ?? 0 }))
-    .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
-
-  const center = positions.reduce(
-    (acc, point) => ({ x: acc.x + point.x, y: acc.y + point.y }),
-    { x: 0, y: 0 }
-  );
-  const count = Math.max(positions.length, 1);
-  center.x /= count;
-  center.y /= count;
-
-  const spread = positions.length
-    ? Math.sqrt(
-        positions.reduce((sum, point) => {
-          const dx = point.x - center.x;
-          const dy = point.y - center.y;
-          return sum + dx * dx + dy * dy;
-        }, 0) / positions.length
-      )
-    : 0;
-
-  const linkDistances = links
-    .map((link) => {
-      const sourceId = getLinkNodeId(link.source);
-      const targetId = getLinkNodeId(link.target);
-      const source = nodes.find((node) => node.id === sourceId);
-      const target = nodes.find((node) => node.id === targetId);
-      if (!source || !target) return null;
-      if (!Number.isFinite(source.x) || !Number.isFinite(target.x)) return null;
-      const dx = source.x - target.x;
-      const dy = source.y - target.y;
-      return Math.hypot(dx, dy);
-    })
-    .filter((value) => value !== null);
-
-  const averageLinkDistance = linkDistances.length
-    ? linkDistances.reduce((sum, value) => sum + value, 0) / linkDistances.length
-    : 0;
-
-  const nodeCount = nodes.length;
-  const linkCount = links.length;
-  const maxLinks = nodeCount > 1 ? (nodeCount * (nodeCount - 1)) / 2 : 1;
-  const density = clamp(linkCount / maxLinks);
-
-  const tension = clamp((averageLinkDistance || 0) / 160);
-  const rhythm = clamp((linkCount + nodeCount) / 20);
-  const heterogeneity = clamp(
-    nodes.reduce((sum, node) => sum + (node.emoji.codePointAt(0) ?? 0), 0) /
-      (nodes.length * 50000)
-  );
-
-  return {
-    density,
-    tension,
-    spread: clamp(spread / 220),
-    rhythm,
-    heterogeneity,
-  };
-};
-
-function AudioEngine({ mode, audioRef }) {
-  useEffect(() => {
-    if (mode !== "PLAY") return undefined;
-    if (audioRef.current) return undefined;
-    if (!navigator?.mediaDevices?.getUserMedia) return undefined;
-
-    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    const analyser = audioContext.createAnalyser();
-    analyser.fftSize = 256;
-    const dataArray = new Uint8Array(analyser.frequencyBinCount);
-
-    let stream = null;
-
-    navigator.mediaDevices
-      .getUserMedia({ audio: true })
-      .then((mediaStream) => {
-        stream = mediaStream;
-        const source = audioContext.createMediaStreamSource(mediaStream);
-        source.connect(analyser);
-        audioRef.current = { analyser, dataArray, audioContext, source, stream };
-      })
-      .catch(() => {
-        audioRef.current = { analyser, dataArray, audioContext, stream: null };
-      });
-
-    return () => {
-      if (stream) {
-        stream.getTracks().forEach((track) => track.stop());
-      }
-      audioContext.close();
-      audioRef.current = null;
-    };
-  }, [audioRef, mode]);
-
-  return null;
-}
-
-function GraphLayer({
-  mode,
-  graphRef,
-  graphVersion,
-  onResoParams,
-  onLink,
-  onRemoveNode,
-}) {
-  const svgRef = useRef(null);
-  const simulationRef = useRef(null);
-  const linkForceRef = useRef(null);
-  const elementsRef = useRef({ nodes: new Map(), links: new Map() });
-  const groupsRef = useRef({ linkGroup: null, nodeGroup: null });
-  const draggingRef = useRef(null);
-  const selectedRef = useRef(null);
-  const dimensionsRef = useRef({ width: 0, height: 0 });
-  const lastResoRef = useRef(0);
-  const modeRef = useRef(mode);
-
-  const updateElements = useCallback(() => {
-    const svg = svgRef.current;
-    if (!svg) return;
-
-    const { nodes, links } = graphRef.current;
-    const elements = elementsRef.current;
-    const { linkGroup, nodeGroup } = groupsRef.current;
-
-    links.forEach((link) => {
-      if (elements.links.has(link.id)) return;
-      const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-      line.setAttribute("class", "graph-link");
-      linkGroup?.appendChild(line);
-      elements.links.set(link.id, line);
-    });
-
-    elements.links.forEach((line, id) => {
-      if (!links.find((link) => link.id === id)) {
-        line.remove();
-        elements.links.delete(id);
-      }
-    });
-
-    nodes.forEach((node) => {
-      if (elements.nodes.has(node.id)) return;
-      const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-      text.setAttribute("class", "graph-node");
-      text.textContent = node.emoji;
-      text.dataset.id = node.id;
-      text.addEventListener("pointerdown", (event) => {
-        if (modeRef.current === "PLAY") return;
-        event.stopPropagation();
-        event.currentTarget.setPointerCapture(event.pointerId);
-        draggingRef.current = {
-          id: node.id,
-          startX: event.clientX,
-          startY: event.clientY,
-          moved: false,
-        };
-        node.fx = node.x;
-        node.fy = node.y;
-      });
-      text.addEventListener("pointermove", (event) => {
-        if (!draggingRef.current || draggingRef.current.id !== node.id) return;
-        const { width, height, left, top } = svg.getBoundingClientRect();
-        const x = event.clientX - left;
-        const y = event.clientY - top;
-        draggingRef.current.moved = true;
-        node.fx = clamp(x, 20, width - 20);
-        node.fy = clamp(y, 20, height - 20);
-        if (simulationRef.current) {
-          simulationRef.current.alpha(0.3).restart();
-        }
-      });
-      text.addEventListener("pointerup", () => {
-        if (!draggingRef.current || draggingRef.current.id !== node.id) return;
-        const moved = draggingRef.current.moved;
-        draggingRef.current = null;
-        node.fx = null;
-        node.fy = null;
-        if (!moved) {
-          if (selectedRef.current && selectedRef.current !== node.id) {
-            onLink(selectedRef.current, node.id);
-            const previous = selectedRef.current;
-            selectedRef.current = null;
-            elementsRef.current.nodes.get(previous)?.classList.remove("is-selected");
-          } else {
-            selectedRef.current = node.id;
-            elementsRef.current.nodes.forEach((el) => el.classList.remove("is-selected"));
-            elementsRef.current.nodes.get(node.id)?.classList.add("is-selected");
-          }
-        }
-      });
-      text.addEventListener("dblclick", () => {
-        if (modeRef.current === "PLAY") return;
-        onRemoveNode(node.id);
-      });
-      nodeGroup?.appendChild(text);
-      elements.nodes.set(node.id, text);
-    });
-
-    elements.nodes.forEach((text, id) => {
-      if (!nodes.find((node) => node.id === id)) {
-        text.remove();
-        elements.nodes.delete(id);
-        if (selectedRef.current === id) {
-          selectedRef.current = null;
-        }
-      }
-    });
-  }, [graphRef, mode, onLink, onRemoveNode]);
-
-  useEffect(() => {
-    const svg = svgRef.current;
-    if (!svg) return;
-
-    const { width, height } = svg.getBoundingClientRect();
-    dimensionsRef.current = { width, height };
-
-    const linkGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
-    const nodeGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
-    linkGroup.setAttribute("class", "graph-links");
-    nodeGroup.setAttribute("class", "graph-nodes");
-    svg.appendChild(linkGroup);
-    svg.appendChild(nodeGroup);
-    groupsRef.current = { linkGroup, nodeGroup };
-
-    const simulation = forceSimulation(graphRef.current.nodes)
-      .force(
-        "link",
-        forceLink(graphRef.current.links)
-          .id((d) => d.id)
-          .distance(80)
-          .strength((d) => d.strength)
-      )
-      .force("charge", forceManyBody().strength(-60))
-      .force("collide", forceCollide(22).strength(0.9).iterations(2))
-      .force("center", forceCenter(width / 2, height / 2));
-
-    linkForceRef.current = simulation.force("link");
-    simulationRef.current = simulation;
-
-    simulation.on("tick", () => {
-      const { nodes, links } = graphRef.current;
-      elementsRef.current.nodes.forEach((text, id) => {
-        const node = nodes.find((item) => item.id === id);
-        if (!node) return;
-        text.setAttribute("x", node.x ?? 0);
-        text.setAttribute("y", node.y ?? 0);
-      });
-
-      elementsRef.current.links.forEach((line, id) => {
-        const link = links.find((item) => item.id === id);
-        if (!link) return;
-        const source = link.source;
-        const target = link.target;
-        const sourceNode =
-          typeof source === "object"
-            ? source
-            : nodes.find((item) => item.id === source);
-        const targetNode =
-          typeof target === "object"
-            ? target
-            : nodes.find((item) => item.id === target);
-        if (!sourceNode || !targetNode) return;
-        line.setAttribute("x1", sourceNode.x ?? 0);
-        line.setAttribute("y1", sourceNode.y ?? 0);
-        line.setAttribute("x2", targetNode.x ?? 0);
-        line.setAttribute("y2", targetNode.y ?? 0);
-      });
-
-      const now = performance.now();
-      if (now - lastResoRef.current > 120) {
-        lastResoRef.current = now;
-        const params = computeResoParams(nodes, links);
-        onResoParams(params);
-      }
-    });
-
-    const resizeObserver = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const { width: nextWidth, height: nextHeight } = entry.contentRect;
-        if (!nextWidth || !nextHeight) return;
-        dimensionsRef.current = { width: nextWidth, height: nextHeight };
-        simulation.force("center", forceCenter(nextWidth / 2, nextHeight / 2));
-        simulation.alpha(0.3).restart();
-      }
-    });
-
-    resizeObserver.observe(svg);
-
-    return () => {
-      resizeObserver.disconnect();
-      simulation.stop();
-    };
-  }, [graphRef, onResoParams]);
-
-  useEffect(() => {
-    modeRef.current = mode;
-  }, [mode]);
-
-  useEffect(() => {
-    updateElements();
-    const simulation = simulationRef.current;
-    if (!simulation) return;
-    simulation.nodes(graphRef.current.nodes);
-    linkForceRef.current?.links(graphRef.current.links);
-
-    if (mode === "PLAY") {
-      simulation.alpha(0.6).restart();
-    } else {
-      simulation.alpha(0.2).restart();
-      simulation.tick(30);
-    }
-  }, [graphRef, graphVersion, mode, updateElements]);
-
-  return <svg ref={svgRef} className="graph-layer" />;
-}
-
-function ThreeLayer({
-  resoParamsRef,
-  audioRef,
-  mode,
-  onAudioPeak,
-  graphRef,
-  graphVersion,
-  composition,
-  visualPreset,
-}) {
+function App() {
   const containerRef = useRef(null);
-  const animationRef = useRef(null);
-  const lastPeakRef = useRef(0);
-  const sceneRef = useRef(null);
-  const spriteMapRef = useRef(new Map());
-  const textureCacheRef = useRef(new Map());
-  const linkLineRef = useRef(null);
-  const emojiGroupRef = useRef(null);
-  const oceanRef = useRef(null);
-  const uniformsRef = useRef(null);
-  const compositionRef = useRef(composition);
+  const enginesRef = useRef(null);
+  const animationRef = useRef({ frame: null, lastTime: 0 });
+  const isPlayingRef = useRef(true);
+  const [isPlaying, setIsPlaying] = useState(true);
+  const [galleryItems, setGalleryItems] = useState([]);
+
+  const storage = useMemo(() => new StorageEngine(), []);
 
   useEffect(() => {
-    compositionRef.current = composition;
-  }, [composition]);
-
-  const buildEmojiTexture = useCallback((emoji) => {
-    if (textureCacheRef.current.has(emoji)) {
-      return textureCacheRef.current.get(emoji);
-    }
-    const canvas = document.createElement("canvas");
-    const size = 128;
-    canvas.width = size;
-    canvas.height = size;
-    const ctx = canvas.getContext("2d");
-    if (ctx) {
-      ctx.clearRect(0, 0, size, size);
-      ctx.font = "96px serif";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(emoji, size / 2, size / 2);
-    }
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.needsUpdate = true;
-    textureCacheRef.current.set(emoji, texture);
-    return texture;
-  }, []);
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
 
   useEffect(() => {
     const container = containerRef.current;
-    if (!container) return undefined;
+    if (!container) return;
 
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(
-      45,
-      container.clientWidth / container.clientHeight,
-      0.1,
-      10
-    );
-    camera.position.z = 2.6;
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    renderer.setPixelRatio(window.devicePixelRatio || 1);
-    renderer.setSize(container.clientWidth, container.clientHeight);
-    container.appendChild(renderer.domElement);
-    sceneRef.current = scene;
-
-    const geometry = new THREE.PlaneGeometry(2, 2);
-    const uniforms = {
-      uTime: { value: 0 },
-      uIntensity: { value: 0.2 },
-      uSpread: { value: 0.2 },
-      uNoise: { value: 0.2 },
-      uResolution: { value: new THREE.Vector2(container.clientWidth, container.clientHeight) },
-      uTintA: { value: new THREE.Color(VISUAL_PRESETS.brume.tintA) },
-      uTintB: { value: new THREE.Color(VISUAL_PRESETS.brume.tintB) },
-    };
-
-    const material = new THREE.ShaderMaterial({
-      uniforms,
-      vertexShader: `
-        void main() {
-          gl_Position = vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform float uTime;
-        uniform float uIntensity;
-        uniform float uSpread;
-        uniform float uNoise;
-        uniform vec2 uResolution;
-        uniform vec3 uTintA;
-        uniform vec3 uTintB;
-
-        float rand(vec2 co) {
-          return fract(sin(dot(co.xy, vec2(12.9898,78.233))) * 43758.5453);
-        }
-
-        void main() {
-          vec2 uv = gl_FragCoord.xy / uResolution;
-          float wave = sin((uv.x + uTime * 0.05) * 6.0) * 0.5 + 0.5;
-          float swirl = sin((uv.y + uTime * 0.03) * 5.0) * 0.5 + 0.5;
-          float noise = rand(uv + uTime) * 0.4;
-          float intensity = mix(wave, swirl, uSpread) + noise * uNoise;
-          vec3 color = mix(uTintA, uTintB, intensity * uIntensity);
-          gl_FragColor = vec4(color, 0.85);
-        }
-      `,
-      transparent: true,
+    const world = new WorldEngine();
+    const render = new RenderEngine(container, { radius: world.radius });
+    const interaction = new InteractionEngine(container, render, world, {
+      onTap: (point) => world.applyRadialImpulse(point),
     });
 
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.position.z = -1.2;
-    scene.add(mesh);
-    uniformsRef.current = uniforms;
+    const initialBubbles = buildInitialBubbles(world);
+    world.setBubbles(initialBubbles);
+    render.syncBubbles(world.bubbles);
 
-    const emojiGroup = new THREE.Group();
-    scene.add(emojiGroup);
-    emojiGroupRef.current = emojiGroup;
+    enginesRef.current = { world, render, interaction };
+    setGalleryItems(storage.list());
 
-    const particleCount = 1800;
-    const particlePositions = new Float32Array(particleCount * 3);
-    const particleBasePositions = new Float32Array(particleCount * 3);
-    for (let i = 0; i < particleCount; i += 1) {
-      const x = (Math.random() - 0.5) * 6;
-      const y = (Math.random() - 0.5) * 4;
-      const z = (Math.random() - 0.5) * 4 - 1.5;
-      particlePositions[i * 3] = x;
-      particlePositions[i * 3 + 1] = y;
-      particlePositions[i * 3 + 2] = z;
-      particleBasePositions[i * 3] = x;
-      particleBasePositions[i * 3 + 1] = y;
-      particleBasePositions[i * 3 + 2] = z;
-    }
-    const particleGeometry = new THREE.BufferGeometry();
-    particleGeometry.setAttribute(
-      "position",
-      new THREE.BufferAttribute(particlePositions, 3)
-    );
-    const particleMaterial = new THREE.PointsMaterial({
-      color: new THREE.Color(0.3, 0.8, 1),
-      size: 0.03,
-      transparent: true,
-      opacity: 0.35,
-      blending: THREE.AdditiveBlending,
-    });
-    const ocean = new THREE.Points(particleGeometry, particleMaterial);
-    oceanRef.current = {
-      points: ocean,
-      basePositions: particleBasePositions,
-      count: particleCount,
-    };
-    scene.add(ocean);
+    const loop = (time) => {
+      const elapsed = (time - animationRef.current.lastTime) / 1000 || 0;
+      animationRef.current.lastTime = time;
 
-    const handleResize = () => {
-      const width = container.clientWidth;
-      const height = container.clientHeight;
-      renderer.setSize(width, height);
-      uniforms.uResolution.value.set(width, height);
-      camera.aspect = width / height;
-      camera.updateProjectionMatrix();
-    };
-    window.addEventListener("resize", handleResize);
-
-    let lastTime = performance.now();
-
-    const animate = (time) => {
-      const delta = (time - lastTime) / 1000;
-      lastTime = time;
-
-      const reso = resoParamsRef.current ?? {
-        tension: 0.2,
-        spread: 0.2,
-      };
-
-      const nodes = graphRef.current.nodes;
-      const links = graphRef.current.links;
-      const width = container.clientWidth || 1;
-      const height = container.clientHeight || 1;
-      const spriteMap = spriteMapRef.current;
-      const compositionState = compositionRef.current;
-      const degreeMap = new Map();
-      links.forEach((link) => {
-        const sourceId = getLinkNodeId(link.source);
-        const targetId = getLinkNodeId(link.target);
-        degreeMap.set(sourceId, (degreeMap.get(sourceId) ?? 0) + 1);
-        degreeMap.set(targetId, (degreeMap.get(targetId) ?? 0) + 1);
-      });
-      const maxDegree = Math.max(...degreeMap.values(), 1);
-
-      let audioLevel = 0.15;
-      const audioState = audioRef.current;
-      if (audioState?.analyser) {
-        audioState.analyser.getByteFrequencyData(audioState.dataArray);
-        const average =
-          audioState.dataArray.reduce((sum, value) => sum + value, 0) /
-          audioState.dataArray.length;
-        audioLevel = clamp(average / 200, 0.05, 1);
+      if (isPlayingRef.current) {
+        world.update(elapsed);
       }
-
-      const intensityTarget = clamp(reso.tension + audioLevel * 0.4, 0.1, 1);
-      const spreadTarget = clamp(reso.spread + audioLevel * 0.3, 0.05, 1);
-
-      uniforms.uTime.value += delta * (mode === "PLAY" ? 1.2 : 0.4);
-      uniforms.uIntensity.value += (intensityTarget - uniforms.uIntensity.value) * 0.05;
-      uniforms.uSpread.value += (spreadTarget - uniforms.uSpread.value) * 0.05;
-      uniforms.uNoise.value += (audioLevel - uniforms.uNoise.value) * 0.08;
-
-      const oceanState = oceanRef.current;
-      if (oceanState) {
-        const { points, basePositions, count } = oceanState;
-        const positions = points.geometry.attributes.position.array;
-        const waveStrength = 0.2 + reso.density * 0.8 + audioLevel * 0.4;
-        for (let i = 0; i < count; i += 1) {
-          const baseIndex = i * 3;
-          const baseX = basePositions[baseIndex];
-          const baseY = basePositions[baseIndex + 1];
-          const baseZ = basePositions[baseIndex + 2];
-          positions[baseIndex] = baseX;
-          positions[baseIndex + 1] =
-            baseY + Math.sin(time * 0.001 + baseX * 2.0 + baseZ) * waveStrength;
-          positions[baseIndex + 2] = baseZ;
-        }
-        points.geometry.attributes.position.needsUpdate = true;
-        points.rotation.z = time * 0.0002;
-      }
-
-      nodes.forEach((node, index) => {
-        const sprite = spriteMap.get(node.id);
-        if (!sprite) return;
-        const normalizedX = ((node.x ?? width / 2) - width / 2) / (width / 2);
-        const normalizedY = -((node.y ?? height / 2) - height / 2) / (height / 2);
-        const degree = degreeMap.get(node.id) ?? 0;
-        const depth = compositionState.depth * (degree / maxDegree) + compositionState.drift * 0.2;
-        const wobble = Math.sin(time * 0.001 + index) * compositionState.drift * 0.08;
-        sprite.position.set(
-          normalizedX * 1.1,
-          normalizedY * 0.9,
-          -depth + wobble
-        );
-        const scale = 0.2 + compositionState.nodeScale * 0.35 + reso.tension * 0.2;
-        sprite.scale.setScalar(scale);
-        sprite.visible = compositionState.showNodes;
-        if (sprite.material) {
-          sprite.material.opacity = 0.7 + compositionState.glow * 0.3;
-        }
-      });
-
-      const linkLine = linkLineRef.current;
-      if (linkLine) {
-        linkLine.visible = compositionState.showLinks;
-        if (linkLine.material) {
-          linkLine.material.opacity = compositionState.linkOpacity;
-        }
-        const linkRotation = 0.0006 + reso.density * 0.002;
-        linkLine.rotation.y += linkRotation;
-        const positions = linkLine.geometry.attributes.position.array;
-        links.forEach((link, index) => {
-          const sourceId = getLinkNodeId(link.source);
-          const targetId = getLinkNodeId(link.target);
-          const sourceNode = nodes.find((item) => item.id === sourceId);
-          const targetNode = nodes.find((item) => item.id === targetId);
-          if (!sourceNode || !targetNode) return;
-          const sx = ((sourceNode.x ?? width / 2) - width / 2) / (width / 2);
-          const sy = -((sourceNode.y ?? height / 2) - height / 2) / (height / 2);
-          const tx = ((targetNode.x ?? width / 2) - width / 2) / (width / 2);
-          const ty = -((targetNode.y ?? height / 2) - height / 2) / (height / 2);
-          const baseIndex = index * 6;
-          positions[baseIndex] = sx * 1.1;
-          positions[baseIndex + 1] = sy * 0.9;
-          positions[baseIndex + 2] = 0;
-          positions[baseIndex + 3] = tx * 1.1;
-          positions[baseIndex + 4] = ty * 0.9;
-          positions[baseIndex + 5] = 0;
-        });
-        linkLine.geometry.attributes.position.needsUpdate = true;
-      }
-
-      if (emojiGroupRef.current) {
-        const rotationSpeed = 0.0008 + reso.density * 0.002;
-        emojiGroupRef.current.rotation.y += rotationSpeed;
-      }
-
-      if (audioLevel > 0.75 && time - lastPeakRef.current > 1200) {
-        lastPeakRef.current = time;
-        onAudioPeak();
-      }
-
-      renderer.render(scene, camera);
-      animationRef.current = requestAnimationFrame(animate);
+      render.render(world.bubbles);
+      animationRef.current.frame = requestAnimationFrame(loop);
     };
 
-    animationRef.current = requestAnimationFrame(animate);
+    animationRef.current.frame = requestAnimationFrame(loop);
 
     return () => {
-      cancelAnimationFrame(animationRef.current);
-      window.removeEventListener("resize", handleResize);
-      renderer.dispose();
-      geometry.dispose();
-      material.dispose();
-      if (oceanRef.current) {
-        oceanRef.current.points.geometry.dispose();
-        oceanRef.current.points.material.dispose();
+      if (animationRef.current.frame) {
+        cancelAnimationFrame(animationRef.current.frame);
       }
-      container.removeChild(renderer.domElement);
+      interaction.dispose();
+      render.dispose();
     };
-  }, [audioRef, buildEmojiTexture, graphRef, mode, onAudioPeak, resoParamsRef]);
+  }, [storage]);
 
-  useEffect(() => {
-    const scene = sceneRef.current;
-    const emojiGroup = emojiGroupRef.current;
-    if (!scene || !emojiGroup) return;
-    const spriteMap = spriteMapRef.current;
-    const nodes = graphRef.current.nodes;
-    const links = graphRef.current.links;
-
-    nodes.forEach((node) => {
-      if (spriteMap.has(node.id)) return;
-      const texture = buildEmojiTexture(node.emoji);
-      const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
-      const sprite = new THREE.Sprite(material);
-      spriteMap.set(node.id, sprite);
-      emojiGroup.add(sprite);
-    });
-
-    spriteMap.forEach((sprite, id) => {
-      if (!nodes.find((node) => node.id === id)) {
-        emojiGroup.remove(sprite);
-        sprite.material?.dispose();
-        spriteMap.delete(id);
-      }
-    });
-
-    if (linkLineRef.current) {
-      scene.remove(linkLineRef.current);
-      linkLineRef.current.geometry.dispose();
-      linkLineRef.current.material.dispose();
-      linkLineRef.current = null;
-    }
-
-    if (links.length > 0) {
-      const positions = new Float32Array(links.length * 6);
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-      const material = new THREE.LineBasicMaterial({
-        color: new THREE.Color(0.6, 0.7, 1),
-        transparent: true,
-        opacity: composition.linkOpacity,
-      });
-      const lineSegments = new THREE.LineSegments(geometry, material);
-      scene.add(lineSegments);
-      linkLineRef.current = lineSegments;
-    }
-  }, [buildEmojiTexture, composition.linkOpacity, graphRef, graphVersion]);
-
-  useEffect(() => {
-    const uniforms = uniformsRef.current;
-    if (!uniforms) return;
-    const preset = VISUAL_PRESETS[visualPreset] ?? VISUAL_PRESETS.brume;
-    uniforms.uTintA.value.set(preset.tintA);
-    uniforms.uTintB.value.set(preset.tintB);
-  }, [visualPreset]);
-
-  return <div ref={containerRef} className="three-layer" />;
-}
-
-export default function App() {
-  const [mode, setMode] = useState("STOP");
-  const [graphVersion, setGraphVersion] = useState(0);
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const [tags, setTags] = useState([]);
-  const [selectedEmojis, setSelectedEmojis] = useState([]);
-  const [visualPreset, setVisualPreset] = useState("brume");
-  const [composition, setComposition] = useState({
-    depth: 0.5,
-    drift: 0.4,
-    glow: 0.45,
-    linkOpacity: 0.5,
-    nodeScale: 0.7,
-    showNodes: true,
-    showLinks: true,
-  });
-  const [resoSnapshot, setResoSnapshot] = useState({
-    density: 0,
-    tension: 0.2,
-    spread: 0.2,
-    rhythm: 0,
-    heterogeneity: 0,
-  });
-
-  const graphRef = useRef({ nodes: [], links: [] });
-  const resoParamsRef = useRef({
-    density: 0,
-    tension: 0.2,
-    spread: 0.2,
-    rhythm: 0,
-    heterogeneity: 0,
-  });
-  const audioRef = useRef(null);
-  const lastResoParamsRef = useRef(resoParamsRef.current);
-  const lastTagRef = useRef(0);
-
-  useEffect(() => {
-    if (graphRef.current.nodes.length === 0) {
-      graphRef.current.nodes.push(createNode(EMOJI_LIBRARY[0]));
-      setGraphVersion((prev) => prev + 1);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (pickerOpen) {
-      setSelectedEmojis([]);
-    }
-  }, [pickerOpen]);
-
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      const now = Date.now();
-      setTags((prev) => prev.filter((tag) => now - tag.createdAt < tag.ttl));
-    }, 400);
-    return () => window.clearInterval(interval);
-  }, []);
-
-  const pickTagText = useCallback(() => {
-    const nodes = graphRef.current.nodes;
-    if (!nodes.length) return "";
-    const index = nodes[Math.floor(Math.random() * nodes.length)].emoji.codePointAt(0) ?? 0;
-    const word = TAG_POOL[index % TAG_POOL.length];
-    const second = TAG_POOL[(index + nodes.length) % TAG_POOL.length];
-    return word === second ? word : `${word} · ${second}`;
-  }, []);
-
-  const spawnTag = useCallback((reason = "") => {
-    const now = Date.now();
-    if (now - lastTagRef.current < 700 && reason !== "add") return;
-    lastTagRef.current = now;
-    const text = pickTagText();
-    if (!text) return;
-    const ttl = 2200 + Math.random() * 1600;
-    setTags((prev) => [
-      ...prev,
-      {
-        id: createId(),
-        text,
-        x: 10 + Math.random() * 80,
-        y: 15 + Math.random() * 70,
-        createdAt: now,
-        ttl,
-      },
-    ]);
-  }, [pickTagText]);
-
-  const addSelectedEmojis = () => {
-    if (selectedEmojis.length === 0) return;
-    selectedEmojis.forEach((emoji) => {
-      graphRef.current.nodes.push(createNode(emoji));
-    });
-    setGraphVersion((prev) => prev + 1);
-    setPickerOpen(false);
-    setSelectedEmojis([]);
-    spawnTag("add");
+  const handleAddEmoji = (emoji) => {
+    const engines = enginesRef.current;
+    if (!engines) return;
+    const bubble = engines.world.addBubble(emoji);
+    engines.render.syncBubbles(engines.world.bubbles);
+    return bubble;
   };
 
-  const toggleEmojiSelection = (emoji) => {
-    setSelectedEmojis((prev) =>
-      prev.includes(emoji) ? prev.filter((item) => item !== emoji) : [...prev, emoji]
-    );
+  const handleReset = () => {
+    const engines = enginesRef.current;
+    if (!engines) return;
+    const fresh = buildInitialBubbles(engines.world);
+    engines.world.setBubbles(fresh);
+    engines.render.syncBubbles(engines.world.bubbles);
   };
 
-  const addLink = (sourceId, targetId) => {
-    if (sourceId === targetId) return;
-    const existingIndex = graphRef.current.links.findIndex(
-      (link) =>
-        (getLinkNodeId(link.source) === sourceId &&
-          getLinkNodeId(link.target) === targetId) ||
-        (getLinkNodeId(link.source) === targetId &&
-          getLinkNodeId(link.target) === sourceId)
-    );
-    if (existingIndex !== -1) {
-      graphRef.current.links.splice(existingIndex, 1);
-      setGraphVersion((prev) => prev + 1);
-      spawnTag("unlink");
-      return;
-    }
-    graphRef.current.links.push(createLink(sourceId, targetId, 0.6));
-    setGraphVersion((prev) => prev + 1);
-    spawnTag("link");
+  const handleSave = () => {
+    const engines = enginesRef.current;
+    if (!engines) return;
+    storage.save(engines.world.bubbles);
+    setGalleryItems(storage.list());
   };
 
-  const removeNode = (nodeId) => {
-    graphRef.current.nodes = graphRef.current.nodes.filter((node) => node.id !== nodeId);
-    graphRef.current.links = graphRef.current.links.filter(
-      (link) => getLinkNodeId(link.source) !== nodeId && getLinkNodeId(link.target) !== nodeId
-    );
-    setGraphVersion((prev) => prev + 1);
-  };
-
-  const resetGraph = () => {
-    graphRef.current.nodes = [createNode(EMOJI_LIBRARY[0])];
-    graphRef.current.links = [];
-    setGraphVersion((prev) => prev + 1);
-    spawnTag("reset");
-  };
-
-  const handleResoParams = useCallback(
-    (params) => {
-      resoParamsRef.current = params;
-      setResoSnapshot(params);
-      const previous = lastResoParamsRef.current;
-      const delta = Math.abs(params.tension - previous.tension) +
-        Math.abs(params.spread - previous.spread);
-      if (delta > 0.18) {
-        spawnTag("shift");
-      }
-      lastResoParamsRef.current = params;
-    },
-    [spawnTag]
-  );
-
-  const toggleMode = () => {
-    setMode((prev) => (prev === "PLAY" ? "STOP" : "PLAY"));
-  };
-
-  const emojiOptions = useMemo(() => EMOJI_LIBRARY, []);
-  const visualOptions = useMemo(() => Object.entries(VISUAL_PRESETS), []);
-  const updateComposition = (key, value) => {
-    setComposition((prev) => ({
-      ...prev,
-      [key]: value,
-    }));
+  const handleLoad = (id) => {
+    const engines = enginesRef.current;
+    if (!engines) return;
+    const bubbles = storage.load(id);
+    if (!bubbles) return;
+    engines.world.loadBubbles(bubbles);
+    engines.render.syncBubbles(engines.world.bubbles);
+    setIsPlaying(true);
   };
 
   return (
-    <div className={`app mode-${mode.toLowerCase()}`}>
-      <ThreeLayer
-        resoParamsRef={resoParamsRef}
-        audioRef={audioRef}
-        mode={mode}
-        onAudioPeak={() => spawnTag("audio")}
-        graphRef={graphRef}
-        graphVersion={graphVersion}
-        composition={composition}
-        visualPreset={visualPreset}
-      />
-      <GraphLayer
-        mode={mode}
-        graphRef={graphRef}
-        graphVersion={graphVersion}
-        onResoParams={handleResoParams}
-        onLink={addLink}
-        onRemoveNode={removeNode}
-      />
-      <AudioEngine mode={mode} audioRef={audioRef} />
-      <aside className="composition-panel">
-        <div className="panel-header">
-          <div>
-            <h2>Composition</h2>
-            <p>Construisez l’animation depuis le réseau d’emojis.</p>
-          </div>
-          <span className="panel-mode">{mode === "PLAY" ? "Résonance" : "Édition"}</span>
-        </div>
-        <div className="panel-section">
-          <label htmlFor="visualPreset">Palette visuelle</label>
-          <select
-            id="visualPreset"
-            value={visualPreset}
-            onChange={(event) => setVisualPreset(event.target.value)}
-          >
-            {visualOptions.map(([key, preset]) => (
-              <option key={key} value={key}>
-                {preset.label}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="panel-grid">
-          <label>
-            Profondeur
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.01"
-              value={composition.depth}
-              onChange={(event) => updateComposition("depth", Number(event.target.value))}
-            />
-          </label>
-          <label>
-            Dérive
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.01"
-              value={composition.drift}
-              onChange={(event) => updateComposition("drift", Number(event.target.value))}
-            />
-          </label>
-          <label>
-            Halo
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.01"
-              value={composition.glow}
-              onChange={(event) => updateComposition("glow", Number(event.target.value))}
-            />
-          </label>
-          <label>
-            Opacité liens
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.01"
-              value={composition.linkOpacity}
-              onChange={(event) => updateComposition("linkOpacity", Number(event.target.value))}
-            />
-          </label>
-          <label>
-            Échelle emojis
-            <input
-              type="range"
-              min="0.3"
-              max="1"
-              step="0.01"
-              value={composition.nodeScale}
-              onChange={(event) => updateComposition("nodeScale", Number(event.target.value))}
-            />
-          </label>
-        </div>
-        <div className="panel-toggles">
-          <label>
-            <input
-              type="checkbox"
-              checked={composition.showNodes}
-              onChange={(event) => updateComposition("showNodes", event.target.checked)}
-            />
-            Nœuds
-          </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={composition.showLinks}
-              onChange={(event) => updateComposition("showLinks", event.target.checked)}
-            />
-            Liens
-          </label>
-        </div>
-        <div className="panel-section metrics">
-          <div>
-            <span>Densité</span>
-            <strong>{resoSnapshot.density.toFixed(2)}</strong>
-          </div>
-          <div>
-            <span>Tension</span>
-            <strong>{resoSnapshot.tension.toFixed(2)}</strong>
-          </div>
-          <div>
-            <span>Propagation</span>
-            <strong>{resoSnapshot.spread.toFixed(2)}</strong>
-          </div>
-          <div>
-            <span>Rythme</span>
-            <strong>{resoSnapshot.rhythm.toFixed(2)}</strong>
-          </div>
-          <div>
-            <span>Hétérogénéité</span>
-            <strong>{resoSnapshot.heterogeneity.toFixed(2)}</strong>
-          </div>
-        </div>
-      </aside>
-      <button
-        type="button"
-        className="mode-toggle"
-        onClick={toggleMode}
-        aria-label={mode === "PLAY" ? "Reprendre la main" : "Faire résonner"}
-      >
-        {mode === "PLAY" ? "■" : "▶"}
-      </button>
-      <div className="controls">
-        <button
-          type="button"
-          className="control ghost"
-          onClick={() => setPickerOpen(true)}
-          aria-label="Ajouter un emoji"
-        >
-          +
-        </button>
-        <button
-          type="button"
-          className="control danger"
-          onClick={resetGraph}
-          aria-label="Réinitialiser le graphe"
-        >
-          ⟲
-        </button>
-      </div>
-      {pickerOpen ? (
-        <div className="picker">
-          <div className="picker-grid">
-            {emojiOptions.map((emoji) => (
-              <button
-                type="button"
-                key={emoji}
-                onClick={() => toggleEmojiSelection(emoji)}
-                className={selectedEmojis.includes(emoji) ? "is-selected" : ""}
-                aria-pressed={selectedEmojis.includes(emoji)}
-              >
-                {emoji}
-              </button>
-            ))}
-          </div>
-          <div className="picker-actions">
-            <span className="picker-count">
-              {selectedEmojis.length
-                ? `${selectedEmojis.length} sélectionné${selectedEmojis.length > 1 ? "s" : ""}`
-                : "Sélectionnez un ou plusieurs"}
-            </span>
-            <button
-              type="button"
-              className="picker-submit"
-              onClick={addSelectedEmojis}
-              disabled={selectedEmojis.length === 0}
-            >
-              Déposer
-            </button>
-          </div>
-          <button type="button" className="picker-close" onClick={() => setPickerOpen(false)}>
-            Annuler
-          </button>
-        </div>
-      ) : null}
-      <div className="tags-layer" aria-hidden="true">
-        {tags.map((tag) => (
-          <span
-            key={tag.id}
-            className="tag"
-            style={{
-              left: `${tag.x}%`,
-              top: `${tag.y}%`,
-              animationDuration: `${tag.ttl}ms`,
-            }}
-          >
-            {tag.text}
-          </span>
-        ))}
-      </div>
+    <div className="app">
+      <header className="app__header">
+        <h1>Cosmoji Transmédiation</h1>
+      </header>
+
+      <main className="app__main">
+        <div className="stage" ref={containerRef} />
+
+        <Controls
+          isPlaying={isPlaying}
+          onTogglePlay={() => setIsPlaying((prev) => !prev)}
+          onReset={handleReset}
+          onSave={handleSave}
+        />
+
+        <EmojiDeck onAddEmoji={handleAddEmoji} />
+
+        <Gallery items={galleryItems} onLoad={handleLoad} />
+      </main>
     </div>
   );
 }
+
+export default App;
