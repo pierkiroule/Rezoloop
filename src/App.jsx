@@ -8,7 +8,38 @@ import {
 } from "d3-force";
 import * as THREE from "three";
 
-const EMOJI_LIBRARY = ["🌊", "🌫️", "🔥", "⚡", "🌱", "🪨", "🪐", "🧭", "🪞", "🧵", "🌙", "✨"];
+const EMOJI_LIBRARY = [
+  "🌊",
+  "🌫️",
+  "🔥",
+  "⚡",
+  "🌱",
+  "🪨",
+  "🪐",
+  "🧭",
+  "🪞",
+  "🧵",
+  "🌙",
+  "✨",
+];
+
+const VISUAL_PRESETS = {
+  brume: {
+    label: "Brume bleutée",
+    tintA: "#0a0f1b",
+    tintB: "#6f8cff",
+  },
+  eclipse: {
+    label: "Éclipse",
+    tintA: "#09080f",
+    tintB: "#ff6fb1",
+  },
+  lave: {
+    label: "Lave douce",
+    tintA: "#140a08",
+    tintB: "#ff9f5a",
+  },
+};
 
 const TAG_POOL = [
   "onde",
@@ -373,21 +404,70 @@ function GraphLayer({
   return <svg ref={svgRef} className="graph-layer" />;
 }
 
-function ThreeLayer({ resoParamsRef, audioRef, mode, onAudioPeak }) {
+function ThreeLayer({
+  resoParamsRef,
+  audioRef,
+  mode,
+  onAudioPeak,
+  graphRef,
+  graphVersion,
+  composition,
+  visualPreset,
+}) {
   const containerRef = useRef(null);
   const animationRef = useRef(null);
   const lastPeakRef = useRef(0);
+  const sceneRef = useRef(null);
+  const spriteMapRef = useRef(new Map());
+  const textureCacheRef = useRef(new Map());
+  const linkLineRef = useRef(null);
+  const emojiGroupRef = useRef(null);
+  const uniformsRef = useRef(null);
+  const compositionRef = useRef(composition);
+
+  useEffect(() => {
+    compositionRef.current = composition;
+  }, [composition]);
+
+  const buildEmojiTexture = useCallback((emoji) => {
+    if (textureCacheRef.current.has(emoji)) {
+      return textureCacheRef.current.get(emoji);
+    }
+    const canvas = document.createElement("canvas");
+    const size = 128;
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext("2d");
+    if (ctx) {
+      ctx.clearRect(0, 0, size, size);
+      ctx.font = "96px serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(emoji, size / 2, size / 2);
+    }
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    textureCacheRef.current.set(emoji, texture);
+    return texture;
+  }, []);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return undefined;
 
     const scene = new THREE.Scene();
-    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    const camera = new THREE.PerspectiveCamera(
+      45,
+      container.clientWidth / container.clientHeight,
+      0.1,
+      10
+    );
+    camera.position.z = 2.6;
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(window.devicePixelRatio || 1);
     renderer.setSize(container.clientWidth, container.clientHeight);
     container.appendChild(renderer.domElement);
+    sceneRef.current = scene;
 
     const geometry = new THREE.PlaneGeometry(2, 2);
     const uniforms = {
@@ -396,6 +476,8 @@ function ThreeLayer({ resoParamsRef, audioRef, mode, onAudioPeak }) {
       uSpread: { value: 0.2 },
       uNoise: { value: 0.2 },
       uResolution: { value: new THREE.Vector2(container.clientWidth, container.clientHeight) },
+      uTintA: { value: new THREE.Color(VISUAL_PRESETS.brume.tintA) },
+      uTintB: { value: new THREE.Color(VISUAL_PRESETS.brume.tintB) },
     };
 
     const material = new THREE.ShaderMaterial({
@@ -411,6 +493,8 @@ function ThreeLayer({ resoParamsRef, audioRef, mode, onAudioPeak }) {
         uniform float uSpread;
         uniform float uNoise;
         uniform vec2 uResolution;
+        uniform vec3 uTintA;
+        uniform vec3 uTintB;
 
         float rand(vec2 co) {
           return fract(sin(dot(co.xy, vec2(12.9898,78.233))) * 43758.5453);
@@ -422,7 +506,7 @@ function ThreeLayer({ resoParamsRef, audioRef, mode, onAudioPeak }) {
           float swirl = sin((uv.y + uTime * 0.03) * 5.0) * 0.5 + 0.5;
           float noise = rand(uv + uTime) * 0.4;
           float intensity = mix(wave, swirl, uSpread) + noise * uNoise;
-          vec3 color = vec3(0.08, 0.1, 0.15) + intensity * uIntensity * vec3(0.4, 0.3, 0.6);
+          vec3 color = mix(uTintA, uTintB, intensity * uIntensity);
           gl_FragColor = vec4(color, 0.85);
         }
       `,
@@ -430,13 +514,21 @@ function ThreeLayer({ resoParamsRef, audioRef, mode, onAudioPeak }) {
     });
 
     const mesh = new THREE.Mesh(geometry, material);
+    mesh.position.z = -1.2;
     scene.add(mesh);
+    uniformsRef.current = uniforms;
+
+    const emojiGroup = new THREE.Group();
+    scene.add(emojiGroup);
+    emojiGroupRef.current = emojiGroup;
 
     const handleResize = () => {
       const width = container.clientWidth;
       const height = container.clientHeight;
       renderer.setSize(width, height);
       uniforms.uResolution.value.set(width, height);
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
     };
     window.addEventListener("resize", handleResize);
 
@@ -450,6 +542,21 @@ function ThreeLayer({ resoParamsRef, audioRef, mode, onAudioPeak }) {
         tension: 0.2,
         spread: 0.2,
       };
+
+      const nodes = graphRef.current.nodes;
+      const links = graphRef.current.links;
+      const width = container.clientWidth || 1;
+      const height = container.clientHeight || 1;
+      const spriteMap = spriteMapRef.current;
+      const compositionState = compositionRef.current;
+      const degreeMap = new Map();
+      links.forEach((link) => {
+        const sourceId = getLinkNodeId(link.source);
+        const targetId = getLinkNodeId(link.target);
+        degreeMap.set(sourceId, (degreeMap.get(sourceId) ?? 0) + 1);
+        degreeMap.set(targetId, (degreeMap.get(targetId) ?? 0) + 1);
+      });
+      const maxDegree = Math.max(...degreeMap.values(), 1);
 
       let audioLevel = 0.15;
       const audioState = audioRef.current;
@@ -468,6 +575,55 @@ function ThreeLayer({ resoParamsRef, audioRef, mode, onAudioPeak }) {
       uniforms.uIntensity.value += (intensityTarget - uniforms.uIntensity.value) * 0.05;
       uniforms.uSpread.value += (spreadTarget - uniforms.uSpread.value) * 0.05;
       uniforms.uNoise.value += (audioLevel - uniforms.uNoise.value) * 0.08;
+
+      nodes.forEach((node, index) => {
+        const sprite = spriteMap.get(node.id);
+        if (!sprite) return;
+        const normalizedX = ((node.x ?? width / 2) - width / 2) / (width / 2);
+        const normalizedY = -((node.y ?? height / 2) - height / 2) / (height / 2);
+        const degree = degreeMap.get(node.id) ?? 0;
+        const depth = compositionState.depth * (degree / maxDegree) + compositionState.drift * 0.2;
+        const wobble = Math.sin(time * 0.001 + index) * compositionState.drift * 0.08;
+        sprite.position.set(
+          normalizedX * 1.1,
+          normalizedY * 0.9,
+          -depth + wobble
+        );
+        const scale = 0.2 + compositionState.nodeScale * 0.35 + reso.tension * 0.2;
+        sprite.scale.setScalar(scale);
+        sprite.visible = compositionState.showNodes;
+        if (sprite.material) {
+          sprite.material.opacity = 0.7 + compositionState.glow * 0.3;
+        }
+      });
+
+      const linkLine = linkLineRef.current;
+      if (linkLine) {
+        linkLine.visible = compositionState.showLinks;
+        if (linkLine.material) {
+          linkLine.material.opacity = compositionState.linkOpacity;
+        }
+        const positions = linkLine.geometry.attributes.position.array;
+        links.forEach((link, index) => {
+          const sourceId = getLinkNodeId(link.source);
+          const targetId = getLinkNodeId(link.target);
+          const sourceNode = nodes.find((item) => item.id === sourceId);
+          const targetNode = nodes.find((item) => item.id === targetId);
+          if (!sourceNode || !targetNode) return;
+          const sx = ((sourceNode.x ?? width / 2) - width / 2) / (width / 2);
+          const sy = -((sourceNode.y ?? height / 2) - height / 2) / (height / 2);
+          const tx = ((targetNode.x ?? width / 2) - width / 2) / (width / 2);
+          const ty = -((targetNode.y ?? height / 2) - height / 2) / (height / 2);
+          const baseIndex = index * 6;
+          positions[baseIndex] = sx * 1.1;
+          positions[baseIndex + 1] = sy * 0.9;
+          positions[baseIndex + 2] = 0;
+          positions[baseIndex + 3] = tx * 1.1;
+          positions[baseIndex + 4] = ty * 0.9;
+          positions[baseIndex + 5] = 0;
+        });
+        linkLine.geometry.attributes.position.needsUpdate = true;
+      }
 
       if (audioLevel > 0.75 && time - lastPeakRef.current > 1200) {
         lastPeakRef.current = time;
@@ -488,7 +644,61 @@ function ThreeLayer({ resoParamsRef, audioRef, mode, onAudioPeak }) {
       material.dispose();
       container.removeChild(renderer.domElement);
     };
-  }, [audioRef, mode, onAudioPeak, resoParamsRef]);
+  }, [audioRef, buildEmojiTexture, graphRef, mode, onAudioPeak, resoParamsRef]);
+
+  useEffect(() => {
+    const emojiGroup = emojiGroupRef.current;
+    if (!emojiGroup) return;
+    const spriteMap = spriteMapRef.current;
+    const nodes = graphRef.current.nodes;
+    const links = graphRef.current.links;
+
+    nodes.forEach((node) => {
+      if (spriteMap.has(node.id)) return;
+      const texture = buildEmojiTexture(node.emoji);
+      const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
+      const sprite = new THREE.Sprite(material);
+      spriteMap.set(node.id, sprite);
+      emojiGroup.add(sprite);
+    });
+
+    spriteMap.forEach((sprite, id) => {
+      if (!nodes.find((node) => node.id === id)) {
+        emojiGroup.remove(sprite);
+        sprite.material?.dispose();
+        spriteMap.delete(id);
+      }
+    });
+
+    if (linkLineRef.current) {
+      scene.remove(linkLineRef.current);
+      linkLineRef.current.geometry.dispose();
+      linkLineRef.current.material.dispose();
+      linkLineRef.current = null;
+    }
+
+    if (links.length > 0) {
+      const positions = new Float32Array(links.length * 6);
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      const material = new THREE.LineBasicMaterial({
+        color: new THREE.Color(0.6, 0.7, 1),
+        transparent: true,
+        opacity: composition.linkOpacity,
+      });
+      const lineSegments = new THREE.LineSegments(geometry, material);
+      scene.add(lineSegments);
+      linkLineRef.current = lineSegments;
+    }
+  }, [buildEmojiTexture, composition.linkOpacity, graphRef, graphVersion]);
+
+  useEffect(() => {
+    const uniforms = uniformsRef.current;
+    if (!uniforms) return;
+    const preset = VISUAL_PRESETS[visualPreset] ?? VISUAL_PRESETS.brume;
+    uniforms.uTintA.value.set(preset.tintA);
+    uniforms.uTintB.value.set(preset.tintB);
+  }, [visualPreset]);
 
   return <div ref={containerRef} className="three-layer" />;
 }
@@ -499,6 +709,23 @@ export default function App() {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [tags, setTags] = useState([]);
   const [selectedEmojis, setSelectedEmojis] = useState([]);
+  const [visualPreset, setVisualPreset] = useState("brume");
+  const [composition, setComposition] = useState({
+    depth: 0.5,
+    drift: 0.4,
+    glow: 0.45,
+    linkOpacity: 0.5,
+    nodeScale: 0.7,
+    showNodes: true,
+    showLinks: true,
+  });
+  const [resoSnapshot, setResoSnapshot] = useState({
+    density: 0,
+    tension: 0.2,
+    spread: 0.2,
+    rhythm: 0,
+    heterogeneity: 0,
+  });
 
   const graphRef = useRef({ nodes: [], links: [] });
   const resoParamsRef = useRef({
@@ -610,6 +837,7 @@ export default function App() {
   const handleResoParams = useCallback(
     (params) => {
       resoParamsRef.current = params;
+      setResoSnapshot(params);
       const previous = lastResoParamsRef.current;
       const delta = Math.abs(params.tension - previous.tension) +
         Math.abs(params.spread - previous.spread);
@@ -626,6 +854,13 @@ export default function App() {
   };
 
   const emojiOptions = useMemo(() => EMOJI_LIBRARY, []);
+  const visualOptions = useMemo(() => Object.entries(VISUAL_PRESETS), []);
+  const updateComposition = (key, value) => {
+    setComposition((prev) => ({
+      ...prev,
+      [key]: value,
+    }));
+  };
 
   return (
     <div className={`app mode-${mode.toLowerCase()}`}>
@@ -634,6 +869,10 @@ export default function App() {
         audioRef={audioRef}
         mode={mode}
         onAudioPeak={() => spawnTag("audio")}
+        graphRef={graphRef}
+        graphVersion={graphVersion}
+        composition={composition}
+        visualPreset={visualPreset}
       />
       <GraphLayer
         mode={mode}
@@ -644,6 +883,126 @@ export default function App() {
         onRemoveNode={removeNode}
       />
       <AudioEngine mode={mode} audioRef={audioRef} />
+      <aside className="composition-panel">
+        <div className="panel-header">
+          <div>
+            <h2>Composition</h2>
+            <p>Construisez l’animation depuis le réseau d’emojis.</p>
+          </div>
+          <span className="panel-mode">{mode === "PLAY" ? "Résonance" : "Édition"}</span>
+        </div>
+        <div className="panel-section">
+          <label htmlFor="visualPreset">Palette visuelle</label>
+          <select
+            id="visualPreset"
+            value={visualPreset}
+            onChange={(event) => setVisualPreset(event.target.value)}
+          >
+            {visualOptions.map(([key, preset]) => (
+              <option key={key} value={key}>
+                {preset.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="panel-grid">
+          <label>
+            Profondeur
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={composition.depth}
+              onChange={(event) => updateComposition("depth", Number(event.target.value))}
+            />
+          </label>
+          <label>
+            Dérive
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={composition.drift}
+              onChange={(event) => updateComposition("drift", Number(event.target.value))}
+            />
+          </label>
+          <label>
+            Halo
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={composition.glow}
+              onChange={(event) => updateComposition("glow", Number(event.target.value))}
+            />
+          </label>
+          <label>
+            Opacité liens
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={composition.linkOpacity}
+              onChange={(event) => updateComposition("linkOpacity", Number(event.target.value))}
+            />
+          </label>
+          <label>
+            Échelle emojis
+            <input
+              type="range"
+              min="0.3"
+              max="1"
+              step="0.01"
+              value={composition.nodeScale}
+              onChange={(event) => updateComposition("nodeScale", Number(event.target.value))}
+            />
+          </label>
+        </div>
+        <div className="panel-toggles">
+          <label>
+            <input
+              type="checkbox"
+              checked={composition.showNodes}
+              onChange={(event) => updateComposition("showNodes", event.target.checked)}
+            />
+            Nœuds
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={composition.showLinks}
+              onChange={(event) => updateComposition("showLinks", event.target.checked)}
+            />
+            Liens
+          </label>
+        </div>
+        <div className="panel-section metrics">
+          <div>
+            <span>Densité</span>
+            <strong>{resoSnapshot.density.toFixed(2)}</strong>
+          </div>
+          <div>
+            <span>Tension</span>
+            <strong>{resoSnapshot.tension.toFixed(2)}</strong>
+          </div>
+          <div>
+            <span>Propagation</span>
+            <strong>{resoSnapshot.spread.toFixed(2)}</strong>
+          </div>
+          <div>
+            <span>Rythme</span>
+            <strong>{resoSnapshot.rhythm.toFixed(2)}</strong>
+          </div>
+          <div>
+            <span>Hétérogénéité</span>
+            <strong>{resoSnapshot.heterogeneity.toFixed(2)}</strong>
+          </div>
+        </div>
+      </aside>
       <button
         type="button"
         className="mode-toggle"
