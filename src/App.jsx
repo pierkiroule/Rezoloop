@@ -422,6 +422,7 @@ function ThreeLayer({
   const textureCacheRef = useRef(new Map());
   const linkLineRef = useRef(null);
   const emojiGroupRef = useRef(null);
+  const oceanRef = useRef(null);
   const uniformsRef = useRef(null);
   const compositionRef = useRef(composition);
 
@@ -522,6 +523,40 @@ function ThreeLayer({
     scene.add(emojiGroup);
     emojiGroupRef.current = emojiGroup;
 
+    const particleCount = 1800;
+    const particlePositions = new Float32Array(particleCount * 3);
+    const particleBasePositions = new Float32Array(particleCount * 3);
+    for (let i = 0; i < particleCount; i += 1) {
+      const x = (Math.random() - 0.5) * 6;
+      const y = (Math.random() - 0.5) * 4;
+      const z = (Math.random() - 0.5) * 4 - 1.5;
+      particlePositions[i * 3] = x;
+      particlePositions[i * 3 + 1] = y;
+      particlePositions[i * 3 + 2] = z;
+      particleBasePositions[i * 3] = x;
+      particleBasePositions[i * 3 + 1] = y;
+      particleBasePositions[i * 3 + 2] = z;
+    }
+    const particleGeometry = new THREE.BufferGeometry();
+    particleGeometry.setAttribute(
+      "position",
+      new THREE.BufferAttribute(particlePositions, 3)
+    );
+    const particleMaterial = new THREE.PointsMaterial({
+      color: new THREE.Color(0.3, 0.8, 1),
+      size: 0.03,
+      transparent: true,
+      opacity: 0.35,
+      blending: THREE.AdditiveBlending,
+    });
+    const ocean = new THREE.Points(particleGeometry, particleMaterial);
+    oceanRef.current = {
+      points: ocean,
+      basePositions: particleBasePositions,
+      count: particleCount,
+    };
+    scene.add(ocean);
+
     const handleResize = () => {
       const width = container.clientWidth;
       const height = container.clientHeight;
@@ -576,6 +611,25 @@ function ThreeLayer({
       uniforms.uSpread.value += (spreadTarget - uniforms.uSpread.value) * 0.05;
       uniforms.uNoise.value += (audioLevel - uniforms.uNoise.value) * 0.08;
 
+      const oceanState = oceanRef.current;
+      if (oceanState) {
+        const { points, basePositions, count } = oceanState;
+        const positions = points.geometry.attributes.position.array;
+        const waveStrength = 0.2 + reso.density * 0.8 + audioLevel * 0.4;
+        for (let i = 0; i < count; i += 1) {
+          const baseIndex = i * 3;
+          const baseX = basePositions[baseIndex];
+          const baseY = basePositions[baseIndex + 1];
+          const baseZ = basePositions[baseIndex + 2];
+          positions[baseIndex] = baseX;
+          positions[baseIndex + 1] =
+            baseY + Math.sin(time * 0.001 + baseX * 2.0 + baseZ) * waveStrength;
+          positions[baseIndex + 2] = baseZ;
+        }
+        points.geometry.attributes.position.needsUpdate = true;
+        points.rotation.z = time * 0.0002;
+      }
+
       nodes.forEach((node, index) => {
         const sprite = spriteMap.get(node.id);
         if (!sprite) return;
@@ -603,6 +657,8 @@ function ThreeLayer({
         if (linkLine.material) {
           linkLine.material.opacity = compositionState.linkOpacity;
         }
+        const linkRotation = 0.0006 + reso.density * 0.002;
+        linkLine.rotation.y += linkRotation;
         const positions = linkLine.geometry.attributes.position.array;
         links.forEach((link, index) => {
           const sourceId = getLinkNodeId(link.source);
@@ -625,6 +681,11 @@ function ThreeLayer({
         linkLine.geometry.attributes.position.needsUpdate = true;
       }
 
+      if (emojiGroupRef.current) {
+        const rotationSpeed = 0.0008 + reso.density * 0.002;
+        emojiGroupRef.current.rotation.y += rotationSpeed;
+      }
+
       if (audioLevel > 0.75 && time - lastPeakRef.current > 1200) {
         lastPeakRef.current = time;
         onAudioPeak();
@@ -642,13 +703,18 @@ function ThreeLayer({
       renderer.dispose();
       geometry.dispose();
       material.dispose();
+      if (oceanRef.current) {
+        oceanRef.current.points.geometry.dispose();
+        oceanRef.current.points.material.dispose();
+      }
       container.removeChild(renderer.domElement);
     };
   }, [audioRef, buildEmojiTexture, graphRef, mode, onAudioPeak, resoParamsRef]);
 
   useEffect(() => {
+    const scene = sceneRef.current;
     const emojiGroup = emojiGroupRef.current;
-    if (!emojiGroup) return;
+    if (!scene || !emojiGroup) return;
     const spriteMap = spriteMapRef.current;
     const nodes = graphRef.current.nodes;
     const links = graphRef.current.links;
@@ -832,6 +898,13 @@ export default function App() {
       (link) => getLinkNodeId(link.source) !== nodeId && getLinkNodeId(link.target) !== nodeId
     );
     setGraphVersion((prev) => prev + 1);
+  };
+
+  const resetGraph = () => {
+    graphRef.current.nodes = [createNode(EMOJI_LIBRARY[0])];
+    graphRef.current.links = [];
+    setGraphVersion((prev) => prev + 1);
+    spawnTag("reset");
   };
 
   const handleResoParams = useCallback(
@@ -1019,6 +1092,14 @@ export default function App() {
           aria-label="Ajouter un emoji"
         >
           +
+        </button>
+        <button
+          type="button"
+          className="control danger"
+          onClick={resetGraph}
+          aria-label="Réinitialiser le graphe"
+        >
+          ⟲
         </button>
       </div>
       {pickerOpen ? (

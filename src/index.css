@@ -216,6 +216,12 @@ body,
   background: rgba(16, 20, 30, 0.45);
 }
 
+.control.danger {
+  background: rgba(36, 18, 24, 0.7);
+  border-color: rgba(255, 128, 150, 0.4);
+  color: rgba(255, 210, 220, 0.9);
+}
+
 .picker {
   position: absolute;
   left: 50%;
